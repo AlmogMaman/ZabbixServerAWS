@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for deploying a Zabbix server and a Windows instance for monitoring.
+
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH/RDP access to the instances.
+    Type: AWS::EC2::KeyPair::KeyName
+  SSHLocation:
+    Description: The IP address range that can be used to access the EC2 instances via SSH or RDP.
+    Type: String
+    Default: 0.0.0.0/0
+
+Resources:
+
+  ZabbixSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH, HTTP, and Zabbix ports access.
+      VpcId: !Ref 'AWS::NoValue'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 10050
+          ToPort: 10051
+          CidrIp: 0.0.0.0/0
+
+  ZabbixServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.medium
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !GetAtt ZabbixSecurityGroup.GroupId
+      ImageId: ami-0a0ad6b70e61be944  # Ubuntu Server 22.04 LTS in us-east-1 region
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt update -y
+          apt upgrade -y
+          apt install -y nginx postgresql postgresql-contrib
+          wget https://repo.zabbix.com/zabbix/6.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.0-2+ubuntu22.04_all.deb
+          dpkg -i zabbix-release_6.0-2+ubuntu22.04_all.deb
+          apt update -y
+          apt install -y zabbix-server-pgsql zabbix-frontend-php zabbix-nginx-conf zabbix-agent
+          sudo -u postgres psql -c "CREATE USER zabbix WITH PASSWORD 'zabbix';"
+          sudo -u postgres createdb -O zabbix zabbix
+          zcat /usr/share/doc/zabbix-server-pgsql/create.sql.gz | sudo -u zabbix psql zabbix
+          sed -i "s/# DBPassword=/DBPassword=zabbix/g" /etc/zabbix/zabbix_server.conf
+          sed -i "s|# php_value date.timezone Europe/Riga|php_value date.timezone Asia/Jerusalem|g" /etc/zabbix/php-fpm.conf
+          systemctl restart zabbix-server zabbix-agent nginx php-fpm
+          systemctl enable zabbix-server zabbix-agent nginx php-fpm
+
+  WindowsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable RDP and Zabbix Agent port access.
+      VpcId: !Ref 'AWS::NoValue'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3389
+          ToPort: 3389
+          CidrIp: !Ref SSHLocation
+        - IpProtocol: tcp
+          FromPort: 10050
+          ToPort: 10050
+          CidrIp: !GetAtt ZabbixSecurityGroup.GroupId
+
+  WindowsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.medium
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !GetAtt WindowsSecurityGroup.GroupId
+      ImageId: ami-0b2f6494ff0b07a0e  # Windows Server 2019 in us-east-1 region
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          $url = "https://cdn.zabbix.com/zabbix/binaries/stable/6.0/6.0.19/zabbix_agents_6.0.19.win.zip"
+          $output = "$env:USERPROFILE\zabbix_agent.zip"
+          Invoke-WebRequest -Uri $url -OutFile $output
+          Expand-Archive -Path $output -DestinationPath "$env:ProgramFiles\Zabbix Agent"
+          $config = "$env:ProgramFiles\Zabbix Agent\conf\zabbix_agentd.win.conf"
+          (Get-Content $config) -replace '^Server=127.0.0.1', "Server=${ZabbixServerInstance.PrivateIp}" | Set-Content $config
+          (Get-Content $config) -replace '^ServerActive=127.0.0.1', "ServerActive=${ZabbixServerInstance.PrivateIp}" | Set-Content $config
+          & "$env:ProgramFiles\Zabbix Agent\bin\win64\zabbix_agentd.exe" --config "$config" --install
+          Start-Service -Name "Zabbix Agent"
+          Set-Service -Name "Audiosrv" -StartupType Automatic
+          Start-Service -Name "Audiosrv"
+          </powershell>
+
+Outputs:
+  ZabbixServerPublicIP:
+    Description: Public IP address of the Zabbix Server instance.
+    Value: !GetAtt ZabbixServerInstance.PublicIp
+  WindowsInstancePublicIP:
+    Description: Public IP address of the Windows instance.
+    Value: !GetAtt WindowsInstance.PublicIp
