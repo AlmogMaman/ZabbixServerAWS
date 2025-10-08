@@ -1,0 +1,88 @@
+{
+  "Parameters": [
+    {
+      "ParameterKey": "VpcCIDR",
+      "ParameterValue": "10.0.0.0/16"
+    },
+    {
+      "ParameterKey": "PublicSubnet1CIDR",
+      "ParameterValue": "10.0.1.0/24"
+    },
+    {
+      "ParameterKey": "PublicSubnet2CIDR",
+      "ParameterValue": "10.0.2.0/24"
+    },
+    {
+      "ParameterKey": "PrivateSubnet1CIDR",
+      "ParameterValue": "10.0.10.0/24"
+    },
+    {
+      "ParameterKey": "PrivateSubnet2CIDR",
+      "ParameterValue": "10.0.11.0/24"
+    },
+    {
+      "ParameterKey": "SSHAccessCIDR",
+      "ParameterValue": "0.0.0.0/0",
+      "UsePreviousValue": false,
+      "Description": "CHANGE THIS! Use YOUR.IP.ADDRESS/32 for security"
+    },
+    {
+      "ParameterKey": "WebAccessCIDR",
+      "ParameterValue": "0.0.0.0/0",
+      "Description": "CIDR for Zabbix/Grafana web access. Restrict in production."
+    },
+    {
+      "ParameterKey": "ZabbixInstanceType",
+      "ParameterValue": "t3.medium",
+      "Description": "t3.small for dev, t3.medium for production"
+    },
+    {
+      "ParameterKey": "WindowsInstanceType",
+      "ParameterValue": "t3.medium"
+    },
+    {
+      "ParameterKey": "KeyPairName",
+      "ParameterValue": "your-keypair-name",
+      "Description": "REQUIRED: Your EC2 key pair name"
+    },
+    {
+      "ParameterKey": "DBInstanceClass",
+      "ParameterValue": "db.t3.micro",
+      "Description": "db.t3.micro for dev/test, db.t3.small+ for production"
+    },
+    {
+      "ParameterKey": "DBAllocatedStorage",
+      "ParameterValue": "20",
+      "Description": "Database size in GB (20-100)"
+    },
+    {
+      "ParameterKey": "DBUsername",
+      "ParameterValue": "zabbix"
+    },
+    {
+      "ParameterKey": "DBPassword",
+      "ParameterValue": "ChangeMe123!SecurePassword",
+      "Description": "CHANGE THIS! Min 8 chars, use strong password"
+    },
+    {
+      "ParameterKey": "ZabbixAdminPassword",
+      "ParameterValue": "ZabbixAdmin123!",
+      "Description": "CHANGE THIS! Zabbix web admin password"
+    },
+    {
+      "ParameterKey": "GrafanaAdminPassword",
+      "ParameterValue": "GrafanaAdmin123!",
+      "Description": "CHANGE THIS! Grafana admin password"
+    },
+    {
+      "ParameterKey": "TimeZone",
+      "ParameterValue": "Asia/Jerusalem",
+      "Description": "Change to your timezone"
+    },
+    {
+      "ParameterKey": "Environment",
+      "ParameterValue": "Production",
+      "Description": "Development | Staging | Production"
+    }
+  ]
+}
