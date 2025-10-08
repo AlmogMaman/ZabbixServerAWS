@@ -686,4 +686,3 @@ After completing this deployment, you will understand:
 **Deployment Time:** 20 minutes  
 **Estimated Monthly Cost:** $120-135  
 **Difficulty:** Intermediate  
-**Last Updated:** October 2025
