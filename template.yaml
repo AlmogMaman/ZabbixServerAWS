@@ -1,105 +1,765 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: CloudFormation template for deploying a Zabbix server and a Windows instance for monitoring.
+Description: 'Zabbix 7.0 LTS Monitoring Infrastructure - Main Stack with VPC, RDS PostgreSQL, EC2, and Grafana'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - VpcCIDR
+          - PublicSubnet1CIDR
+          - PublicSubnet2CIDR
+          - PrivateSubnet1CIDR
+          - PrivateSubnet2CIDR
+          - SSHAccessCIDR
+          - WebAccessCIDR
+      - Label:
+          default: "EC2 Configuration"
+        Parameters:
+          - ZabbixInstanceType
+          - WindowsInstanceType
+          - KeyPairName
+          - LatestUbuntuAMI
+          - LatestWindowsAMI
+      - Label:
+          default: "Database Configuration"
+        Parameters:
+          - DBInstanceClass
+          - DBAllocatedStorage
+          - DBUsername
+          - DBPassword
+      - Label:
+          default: "Application Configuration"
+        Parameters:
+          - ZabbixAdminPassword
+          - GrafanaAdminPassword
+          - TimeZone
+          - Environment
 
 Parameters:
-  KeyName:
-    Description: Name of an existing EC2 KeyPair to enable SSH/RDP access to the instances.
-    Type: AWS::EC2::KeyPair::KeyName
-  SSHLocation:
-    Description: The IP address range that can be used to access the EC2 instances via SSH or RDP.
+  # Network Parameters
+  VpcCIDR:
+    Description: CIDR block for VPC
+    Type: String
+    Default: 10.0.0.0/16
+    AllowedPattern: '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$'
+
+  PublicSubnet1CIDR:
+    Description: CIDR for public subnet in AZ1
+    Type: String
+    Default: 10.0.1.0/24
+
+  PublicSubnet2CIDR:
+    Description: CIDR for public subnet in AZ2
+    Type: String
+    Default: 10.0.2.0/24
+
+  PrivateSubnet1CIDR:
+    Description: CIDR for private subnet in AZ1
+    Type: String
+    Default: 10.0.10.0/24
+
+  PrivateSubnet2CIDR:
+    Description: CIDR for private subnet in AZ2
+    Type: String
+    Default: 10.0.11.0/24
+
+  SSHAccessCIDR:
+    Description: CIDR allowed to SSH (recommend your IP only)
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})$'
+
+  WebAccessCIDR:
+    Description: CIDR allowed to access web interfaces
     Type: String
     Default: 0.0.0.0/0
 
-Resources:
+  # EC2 Parameters
+  ZabbixInstanceType:
+    Description: EC2 instance type for Zabbix server
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3a.medium
+      - t3a.large
 
-  ZabbixSecurityGroup:
+  WindowsInstanceType:
+    Description: EC2 instance type for Windows monitoring target
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+
+  KeyPairName:
+    Description: EC2 Key Pair for SSH/RDP access
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be an existing EC2 KeyPair
+
+  LatestUbuntuAMI:
+    Description: Ubuntu 24.04 LTS AMI (leave default for auto-lookup)
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+
+  LatestWindowsAMI:
+    Description: Windows Server 2022 AMI (leave default for auto-lookup)
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base
+
+  # Database Parameters
+  DBInstanceClass:
+    Description: RDS instance type
+    Type: String
+    Default: db.t3.micro
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+      - db.t4g.micro
+      - db.t4g.small
+
+  DBAllocatedStorage:
+    Description: Database storage size in GB
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+
+  DBUsername:
+    Description: Database admin username
+    Type: String
+    Default: zabbix
+    MinLength: 1
+    MaxLength: 16
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+
+  DBPassword:
+    Description: Database password (min 8 chars)
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: '[a-zA-Z0-9!@#$%^&*()-_=+]*'
+
+  # Application Parameters
+  ZabbixAdminPassword:
+    Description: Zabbix web interface admin password
+    Type: String
+    NoEcho: true
+    Default: Zabbix123!
+    MinLength: 8
+
+  GrafanaAdminPassword:
+    Description: Grafana admin password
+    Type: String
+    NoEcho: true
+    Default: Grafana123!
+    MinLength: 8
+
+  TimeZone:
+    Description: System timezone
+    Type: String
+    Default: Asia/Jerusalem
+    AllowedValues:
+      - America/New_York
+      - America/Chicago
+      - America/Los_Angeles
+      - Europe/London
+      - Europe/Paris
+      - Asia/Jerusalem
+      - Asia/Tokyo
+      - UTC
+
+  Environment:
+    Description: Environment name
+    Type: String
+    Default: Production
+    AllowedValues:
+      - Development
+      - Staging
+      - Production
+
+Resources:
+  # ==========================================
+  # VPC and Network Resources
+  # ==========================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-VPC
+        - Key: Environment
+          Value: !Ref Environment
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Public-Subnet-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Public-Subnet-2
+
+  # Private Subnets
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Private-Subnet-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Private-Subnet-2
+
+  # NAT Gateway for private subnets
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Public-RT
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Private-RT
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ==========================================
+  # Security Groups
+  # ==========================================
+  ZabbixServerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Enable SSH, HTTP, and Zabbix ports access.
-      VpcId: !Ref 'AWS::NoValue'
+      GroupName: !Sub ${AWS::StackName}-Zabbix-Server-SG
+      GroupDescription: Security group for Zabbix server
+      VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
-          CidrIp: !Ref SSHLocation
+          CidrIp: !Ref SSHAccessCIDR
+          Description: SSH access
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
-          CidrIp: 0.0.0.0/0
+          CidrIp: !Ref WebAccessCIDR
+          Description: HTTP for Zabbix web
         - IpProtocol: tcp
-          FromPort: 10050
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref WebAccessCIDR
+          Description: HTTPS for Zabbix web
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: !Ref WebAccessCIDR
+          Description: Grafana web interface
+        - IpProtocol: tcp
+          FromPort: 10051
           ToPort: 10051
+          CidrIp: !Ref VpcCIDR
+          Description: Zabbix trapper
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
           CidrIp: 0.0.0.0/0
+          Description: ICMP for monitoring
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Zabbix-SG
 
-  ZabbixServerInstance:
-    Type: AWS::EC2::Instance
-    Properties:
-      InstanceType: t3.medium
-      KeyName: !Ref KeyName
-      SecurityGroupIds:
-        - !GetAtt ZabbixSecurityGroup.GroupId
-      ImageId: ami-0a0ad6b70e61be944  # Ubuntu Server 22.04 LTS in us-east-1 region
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          apt update -y
-          apt upgrade -y
-          apt install -y nginx postgresql postgresql-contrib
-          wget https://repo.zabbix.com/zabbix/6.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.0-2+ubuntu22.04_all.deb
-          dpkg -i zabbix-release_6.0-2+ubuntu22.04_all.deb
-          apt update -y
-          apt install -y zabbix-server-pgsql zabbix-frontend-php zabbix-nginx-conf zabbix-agent
-          sudo -u postgres psql -c "CREATE USER zabbix WITH PASSWORD 'zabbix';"
-          sudo -u postgres createdb -O zabbix zabbix
-          zcat /usr/share/doc/zabbix-server-pgsql/create.sql.gz | sudo -u zabbix psql zabbix
-          sed -i "s/# DBPassword=/DBPassword=zabbix/g" /etc/zabbix/zabbix_server.conf
-          sed -i "s|# php_value date.timezone Europe/Riga|php_value date.timezone Asia/Jerusalem|g" /etc/zabbix/php-fpm.conf
-          systemctl restart zabbix-server zabbix-agent nginx php-fpm
-          systemctl enable zabbix-server zabbix-agent nginx php-fpm
-
-  WindowsSecurityGroup:
+  WindowsServerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Enable RDP and Zabbix Agent port access.
-      VpcId: !Ref 'AWS::NoValue'
+      GroupName: !Sub ${AWS::StackName}-Windows-Server-SG
+      GroupDescription: Security group for Windows monitoring target
+      VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 3389
           ToPort: 3389
-          CidrIp: !Ref SSHLocation
+          CidrIp: !Ref SSHAccessCIDR
+          Description: RDP access
         - IpProtocol: tcp
           FromPort: 10050
           ToPort: 10050
-          CidrIp: !GetAtt ZabbixSecurityGroup.GroupId
+          SourceSecurityGroupId: !Ref ZabbixServerSecurityGroup
+          Description: Zabbix agent
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          SourceSecurityGroupId: !Ref ZabbixServerSecurityGroup
+          Description: ICMP from Zabbix
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Windows-SG
 
-  WindowsInstance:
-    Type: AWS::EC2::Instance
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      InstanceType: t3.medium
-      KeyName: !Ref KeyName
-      SecurityGroupIds:
-        - !GetAtt WindowsSecurityGroup.GroupId
-      ImageId: ami-0b2f6494ff0b07a0e  # Windows Server 2019 in us-east-1 region
+      GroupName: !Sub ${AWS::StackName}-RDS-SG
+      GroupDescription: Security group for RDS PostgreSQL
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref ZabbixServerSecurityGroup
+          Description: PostgreSQL from Zabbix server
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-RDS-SG
+
+  # ==========================================
+  # RDS PostgreSQL Database
+  # ==========================================
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub ${AWS::StackName}-db-subnet-group
+      DBSubnetGroupDescription: Subnet group for Zabbix RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-DB-Subnet-Group
+
+  ZabbixDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub ${AWS::StackName}-zabbix-db
+      DBName: zabbix
+      Engine: postgres
+      EngineVersion: '16.3'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: 03:00-04:00
+      PreferredMaintenanceWindow: mon:04:00-mon:05:00
+      MultiAZ: false
+      PubliclyAccessible: false
+      EnableCloudwatchLogsExports:
+        - postgresql
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Zabbix-DB
+
+  # ==========================================
+  # IAM Roles and Instance Profiles
+  # ==========================================
+  ZabbixServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-Zabbix-Server-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ZabbixServerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                  - cloudwatch:PutMetricData
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  ZabbixServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${AWS::StackName}-Zabbix-Profile
+      Roles:
+        - !Ref ZabbixServerRole
+
+  WindowsServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-Windows-Server-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  WindowsServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${AWS::StackName}-Windows-Profile
+      Roles:
+        - !Ref WindowsServerRole
+
+  # ==========================================
+  # EC2 Instances
+  # ==========================================
+  ZabbixServerInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: ZabbixDatabase
+    Properties:
+      InstanceType: !Ref ZabbixInstanceType
+      ImageId: !Ref LatestUbuntuAMI
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref ZabbixServerInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref ZabbixServerSecurityGroup
+          SubnetId: !Ref PublicSubnet1
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > >(tee /var/log/user-data.log)
+          exec 2>&1
+          
+          echo "=== Starting Zabbix Installation ==="
+          
+          # Update system
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+          
+          # Install prerequisites
+          apt-get install -y wget curl vim net-tools postgresql-client
+          
+          # Install Zabbix repository
+          wget https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest+ubuntu24.04_all.deb
+          dpkg -i zabbix-release_latest+ubuntu24.04_all.deb
+          apt-get update
+          
+          # Install Zabbix components
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            zabbix-server-pgsql \
+            zabbix-frontend-php \
+            php8.3-pgsql \
+            zabbix-nginx-conf \
+            zabbix-sql-scripts \
+            zabbix-agent
+          
+          # Wait for RDS to be fully available
+          echo "Waiting for database..."
+          sleep 30
+          
+          # Import database schema
+          export PGPASSWORD='${DBPassword}'
+          zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz | \
+            psql -h ${ZabbixDatabase.Endpoint.Address} \
+                 -U ${DBUsername} \
+                 -d zabbix
+          
+          # Configure Zabbix server
+          cat > /etc/zabbix/zabbix_server.conf <<EOF
+          LogFile=/var/log/zabbix/zabbix_server.log
+          LogFileSize=0
+          PidFile=/run/zabbix/zabbix_server.pid
+          SocketDir=/run/zabbix
+          DBHost=${ZabbixDatabase.Endpoint.Address}
+          DBName=zabbix
+          DBUser=${DBUsername}
+          DBPassword=${DBPassword}
+          SNMPTrapperFile=/var/log/snmptrap/snmptrap.log
+          Timeout=4
+          LogSlowQueries=3000
+          StatsAllowedIP=127.0.0.1
+          EOF
+          
+          # Configure NGINX
+          sed -i 's/# listen/listen/' /etc/zabbix/nginx.conf
+          sed -i 's/# server_name/server_name/' /etc/zabbix/nginx.conf
+          
+          # Configure PHP timezone
+          sed -i "s/;php_value\[date.timezone\]/php_value[date.timezone]/" /etc/zabbix/php-fpm.conf
+          sed -i "s|Europe/Riga|${TimeZone}|" /etc/zabbix/php-fpm.conf
+          
+          # Start services
+          systemctl restart zabbix-server zabbix-agent nginx php8.3-fpm
+          systemctl enable zabbix-server zabbix-agent nginx php8.3-fpm
+          
+          # Install Grafana
+          apt-get install -y software-properties-common
+          wget -q -O - https://packages.grafana.com/gpg.key | apt-key add -
+          echo "deb https://packages.grafana.com/oss/deb stable main" > /etc/apt/sources.list.d/grafana.list
+          apt-get update
+          apt-get install -y grafana
+          
+          # Install Zabbix plugin for Grafana
+          grafana-cli plugins install alexanderzobnin-zabbix-app
+          
+          # Configure Grafana
+          sed -i "s/;admin_password = admin/admin_password = ${GrafanaAdminPassword}/" /etc/grafana/grafana.ini
+          
+          # Start Grafana
+          systemctl start grafana-server
+          systemctl enable grafana-server
+          
+          # Create completion marker
+          touch /var/log/zabbix-installation-complete
+          
+          echo "=== Zabbix Installation Complete ==="
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Zabbix-Server
+        - Key: Environment
+          Value: !Ref Environment
+
+  WindowsServerInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: ZabbixServerInstance
+    Properties:
+      InstanceType: !Ref WindowsInstanceType
+      ImageId: !Ref LatestWindowsAMI
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref WindowsServerInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref WindowsServerSecurityGroup
+          SubnetId: !Ref PublicSubnet2
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
       UserData:
         Fn::Base64: !Sub |
           <powershell>
-          $url = "https://cdn.zabbix.com/zabbix/binaries/stable/6.0/6.0.19/zabbix_agents_6.0.19.win.zip"
-          $output = "$env:USERPROFILE\zabbix_agent.zip"
-          Invoke-WebRequest -Uri $url -OutFile $output
-          Expand-Archive -Path $output -DestinationPath "$env:ProgramFiles\Zabbix Agent"
-          $config = "$env:ProgramFiles\Zabbix Agent\conf\zabbix_agentd.win.conf"
-          (Get-Content $config) -replace '^Server=127.0.0.1', "Server=${ZabbixServerInstance.PrivateIp}" | Set-Content $config
-          (Get-Content $config) -replace '^ServerActive=127.0.0.1', "ServerActive=${ZabbixServerInstance.PrivateIp}" | Set-Content $config
-          & "$env:ProgramFiles\Zabbix Agent\bin\win64\zabbix_agentd.exe" --config "$config" --install
-          Start-Service -Name "Zabbix Agent"
-          Set-Service -Name "Audiosrv" -StartupType Automatic
-          Start-Service -Name "Audiosrv"
+          # Log all output
+          Start-Transcript -Path C:\Windows\Temp\userdata-log.txt
+          
+          Write-Host "=== Installing Zabbix Agent ==="
+          
+          # Download Zabbix Agent
+          $ZabbixAgentURL = "https://cdn.zabbix.com/zabbix/binaries/stable/7.0/7.0.0/zabbix_agent-7.0.0-windows-amd64-openssl.msi"
+          $OutputPath = "C:\Windows\Temp\zabbix_agent.msi"
+          
+          Invoke-WebRequest -Uri $ZabbixAgentURL -OutFile $OutputPath
+          
+          # Install Zabbix Agent
+          $ZabbixServerIP = "${ZabbixServerInstance.PrivateIp}"
+          $Hostname = $env:COMPUTERNAME
+          
+          Start-Process msiexec.exe -ArgumentList "/i `"$OutputPath`" /quiet SERVER=$ZabbixServerIP SERVERACTIVE=$ZabbixServerIP HOSTNAME=$Hostname" -Wait
+          
+          # Configure custom user parameters
+          $ConfigPath = "C:\Program Files\Zabbix Agent\zabbix_agentd.conf"
+          Add-Content -Path $ConfigPath -Value "`nUserParameter=service.audiosrv.state,powershell -NoProfile -Command `"Get-Service -Name 'Audiosrv' | Select-Object -ExpandProperty Status`""
+          Add-Content -Path $ConfigPath -Value "UserParameter=service.audiosrv.running,powershell -NoProfile -Command `"if ((Get-Service -Name 'Audiosrv').Status -eq 'Running') { 1 } else { 0 }`""
+          
+          # Configure firewall
+          New-NetFirewallRule -DisplayName "Zabbix Agent" -Direction Inbound -LocalPort 10050 -Protocol TCP -Action Allow
+          
+          # Restart Zabbix Agent
+          Restart-Service "Zabbix Agent"
+          
+          Write-Host "=== Zabbix Agent Installation Complete ==="
+          Stop-Transcript
           </powershell>
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Windows-Client
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ==========================================
+  # Elastic IPs
+  # ==========================================
+  ZabbixServerEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref ZabbixServerInstance
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Zabbix-EIP
 
 Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VPC-ID
+
   ZabbixServerPublicIP:
-    Description: Public IP address of the Zabbix Server instance.
-    Value: !GetAtt ZabbixServerInstance.PublicIp
-  WindowsInstancePublicIP:
-    Description: Public IP address of the Windows instance.
-    Value: !GetAtt WindowsInstance.PublicIp
+    Description: Zabbix Server Public IP
+    Value: !Ref ZabbixServerEIP
+
+  ZabbixServerPrivateIP:
+    Description: Zabbix Server Private IP
+    Value: !GetAtt ZabbixServerInstance.PrivateIp
+
+  ZabbixWebURL:
+    Description: Zabbix Web Interface URL
+    Value: !Sub http://${ZabbixServerEIP}
+
+  GrafanaURL:
+    Description: Grafana Dashboard URL
+    Value: !Sub http://${ZabbixServerEIP}:3000
+
+  DatabaseEndpoint:
+    Description: RDS PostgreSQL Endpoint
+    Value: !GetAtt ZabbixDatabase.Endpoint.Address
+
+  WindowsServerPublicIP:
+    Description: Windows Server Public IP
+    Value: !GetAtt WindowsServerInstance.PublicIp
+
+  WindowsServerPrivateIP:
+    Description: Windows Server Private IP
+    Value: !GetAtt WindowsServerInstance.PrivateIp
+
+  ZabbixDefaultCredentials:
+    Description: Default Zabbix login credentials
+    Value: "Username: Admin, Password: zabbix (CHANGE THIS!)"
+
+  GrafanaDefaultCredentials:
+    Description: Grafana login credentials
+    Value: !Sub "Username: admin, Password: ${GrafanaAdminPassword}"
+
+  SSHCommand:
+    Description: SSH command to connect to Zabbix server
+    Value: !Sub ssh -i ${KeyPairName}.pem ubuntu@${ZabbixServerEIP}
